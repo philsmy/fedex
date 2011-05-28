@@ -44,10 +44,13 @@ module Fedex #:nodoc:
     WSDL_PATHS = {
       :rate => 'wsdl/RateService_v9.wsdl',
       :ship => 'wsdl/ShipService_v9.wsdl',
+      :trck => 'wsdl/TrackService_v4.wsdl',
     }
     
     # Defines the Web Services version implemented.
-    WS_VERSION = { :Major => 9, :Intermediate => 0, :Minor => 0 }
+    WS_VERSION = {:ship => { :Major => 9, :Intermediate => 0, :Minor => 0 },
+                  :rate => { :Major => 9, :Intermediate => 0, :Minor => 0 },
+                  :trck => { :Major => 4, :Intermediate => 0, :Minor => 0 }}
     
     SUCCESSFUL_RESPONSES = ['SUCCESS', 'WARNING', 'NOTE'] #:nodoc:
     
@@ -280,6 +283,43 @@ module Fedex #:nodoc:
       return successful?(result)
     end
     alias :cancel_shipment :cancel
+    
+    # Tracking
+    def track(options = {})
+      driver = create_driver(:trck)
+
+      tracking_number = options[:tracking_number]
+
+      result = driver.track(common_options(:trck).merge(
+        :PackageIdentifier => {:Value => tracking_number, :Type => "TRACKING_NUMBER_OR_DOORTAG"}
+      ))
+      
+      successful = successful?(result)
+      
+      if successful
+        case result.trackDetails.events.eventType
+        when "IT"
+          # in transit
+          event = "#{result.trackDetails.events.eventDescription}: #{result.trackDetails.events.statusExceptionDescription}"
+          return [event, "", ""]
+        when "DL"
+          # delivered
+          delivery_address = "#{result.trackDetails.actualDeliveryAddress.city}, #{result.trackDetails.actualDeliveryAddress.stateOrProvinceCode} #{result.trackDetails.events.address}"
+          delivery_time = result.trackDetails.actualDeliveryTimestamp
+          event = "#{result.trackDetails.events.eventDescription}: #{result.trackDetails.events.statusExceptionDescription}"
+          signature = ""
+          if result.trackDetails.signatureProofOfDeliveryAvailable == "true"
+            signature = result.trackDetails.deliverySignatureName
+          end
+          return [event, delivery_address, delivery_time,  signature]
+        else
+          return result.trackDetails.events.eventType
+        end
+      else
+        msg = error_msg(result, false)
+        raise FedexError.new("Unable to get track shipment with Fedex: #{msg}")
+      end
+    end
 
     private
 
@@ -335,8 +375,9 @@ module Fedex #:nodoc:
         tracking_number = xml.completedPackageDetails.trackingIds.trackingNumber        
         master_tracking_number = xml.respond_to?(:masterTrackingId) ? xml.masterTrackingId.trackingNumber : nil
         
+        # label = xml.completedPackageDetails.label.parts.image
         label = Base64.decode64(xml.completedPackageDetails.label.parts.image)
-        [charge, label, tracking_number, master_tracking_number]
+        [charge, label, tracking_number, master_tracking_number, result]
       else
         raise FedexError.new("Unable to get label from Fedex: #{msg}")
       end
@@ -367,7 +408,7 @@ module Fedex #:nodoc:
       {
         :WebAuthenticationDetail => { :UserCredential => { :Key => @auth_key, :Password => @security_code } },
         :ClientDetail => { :AccountNumber => @account_number, :MeterNumber => @meter_number },
-        :Version => WS_VERSION.merge({:ServiceId => service.to_s})
+        :Version => WS_VERSION[service].merge({:ServiceId => service.to_s})
       }
     end
 
